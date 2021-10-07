@@ -188,7 +188,7 @@ function job_pool_connect()
     # set the global attibutes
     job_pool_job_queue=/tmp/job_pool_job_queue_${pool_name}
     job_pool_result_log=/tmp/job_pool_result_log_${pool_name}
-    job_pool_pool_size=-1
+    job_pool_pool_size=0
 }
 
 # \brief waits for all queued up jobs to complete and shuts down the job pool
