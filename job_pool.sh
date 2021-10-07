@@ -155,14 +155,18 @@ function _job_pool_start_workers()
 ################################################################################
 
 # \brief initializes the job pool
+# \param[in] pool_name  name of the job pool
 # \param[in] pool_size  number of parallel jobs allowed
 # \param[in] echo_command  1 to turn on echo, 0 to turn off
 function job_pool_init()
 {
-    local pool_size=$1
-    local echo_command=$2
+    local pool_name=$1
+    local pool_size=$2
+    local echo_command=$3
 
     # set the global attibutes
+    job_pool_job_queue=/tmp/job_pool_job_queue_${pool_name}
+    job_pool_result_log=/tmp/job_pool_result_log_${pool_name}
     job_pool_pool_size=${pool_size:=1}
     job_pool_echo_command=${echo_command:=0}
 
@@ -173,6 +177,17 @@ function job_pool_init()
 
     # fork off the workers
     _job_pool_start_workers ${job_pool_job_queue} ${job_pool_result_log}
+}
+
+# \brief connects to an existing job pool
+# \param[in] pool_name  name of the job pool
+function job_pool_connect()
+{
+    local pool_name=$1
+
+    # set the global attibutes
+    job_pool_job_queue=/tmp/job_pool_job_queue_${pool_name}
+    job_pool_result_log=/tmp/job_pool_result_log_${pool_name}
 }
 
 # \brief waits for all queued up jobs to complete and shuts down the job pool
