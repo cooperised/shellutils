@@ -29,8 +29,14 @@
 # end-of-jobs marker
 job_pool_end_of_jobs="JOBPOOL_END_OF_JOBS"
 
+# sequential tasks are given this mode
+job_pool_sequential_tag="seq"
+
 # job queue used to send jobs to the workers
 job_pool_job_queue=/tmp/job_pool_job_queue_$$
+
+# lock file and mode file for job locking
+job_pool_lock_file=/tmp/job_pool_mode_file_$$
 
 # where to run results to
 job_pool_result_log=/tmp/job_pool_result_log_$$
@@ -82,29 +88,41 @@ function _job_pool_print_result_log()
 # \param[in] id  the worker ID
 # \param[in] job_queue  the fifo to read jobs from
 # \param[in] result_log  the temporary log file to write exit codes to
+# \param[in] mode_file  the lockfile and mode file for barriers
 function _job_pool_worker()
 {
     local id=$1
     local job_queue=$2
     local result_log=$3
+    local mode_file=$4
+    local mode=
     local cmd=
     local args=
 
     exec 7<> ${job_queue}
-    while [[ "${cmd}" != "${job_pool_end_of_jobs}" && -e "${job_queue}" ]]; do
+    exec 9<> ${mode_file}
+    while [[ "${mode}" != "${job_pool_end_of_jobs}" && -e "${job_queue}" ]]; do
         # workers block on the exclusive lock to read the job queue
         flock --exclusive 7
+        flock --shared 9
         IFS=$'\v'
-        read cmd args <${job_queue}
+        read mode cmd args <${job_queue}
+        if ! grep -Fxq $mode ${mode_file}; then
+          flock --exclusive 9
+          echo "$mode" > ${mode_file};
+          flock --shared 9
+        fi
         set -- ${args}
         unset IFS
-        flock --unlock 7
+        if [[ "${job_pool_sequential_tag}" != "${mode}" ]]; then
+          flock --unlock 7
+        fi
         # the worker should exit if it sees the end-of-job marker or run the
         # job otherwise and save its exit code to the result log.
-        if [[ "${cmd}" == "${job_pool_end_of_jobs}" ]]; then
+        if [[ "${mode}" == "${job_pool_end_of_jobs}" ]]; then
             # write it one more time for the next sibling so that everyone
             # will know we are exiting.
-            echo "${cmd}" >&7
+            echo "${mode}" >&7
         else
             _job_pool_echo "### _job_pool_worker-${id}: ${cmd}"
             # run the job
@@ -125,8 +143,13 @@ function _job_pool_worker()
             exec 8>&-
             _job_pool_echo "### _job_pool_worker-${id}: exited ${result}: ${cmd} $@"
         fi
+        flock --unlock 9
+        if [[ "${job_pool_sequential_tag}" == "${mode}" ]]; then
+          flock --unlock 7
+        fi
     done
     exec 7>&-
+    exec 9>&-
 }
 
 # \brief sends message to worker processes to stop
@@ -136,17 +159,20 @@ function _job_pool_stop_workers()
     # doing cleanup.
     echo ${job_pool_end_of_jobs} >> ${job_pool_job_queue}
     wait
+    # TODO this isn't good enough - what if there are other forked jobs?
 }
 
 # \brief fork off the workers
 # \param[in] job_queue  the fifo used to send jobs to the workers
 # \param[in] result_log  the temporary log file to write exit codes to
+# \param[in] mode_file  the lockfile and mode file for barriers
 function _job_pool_start_workers()
 {
     local job_queue=$1
     local result_log=$2
+    local mode_file=$3
     for ((i=0; i<${job_pool_pool_size}; i++)); do
-        _job_pool_worker ${i} ${job_queue} ${result_log} &
+        _job_pool_worker ${i} ${job_queue} ${result_log} ${mode_file} &
     done
 }
 
@@ -167,6 +193,7 @@ function job_pool_init()
     # set the global attibutes
     job_pool_job_queue=/tmp/job_pool_job_queue_${pool_name}
     job_pool_result_log=/tmp/job_pool_result_log_${pool_name}
+    job_pool_lock_file=/tmp/job_pool_mode_file_${pool_name}
     job_pool_pool_size=${pool_size:=1}
     job_pool_echo_command=${echo_command:=0}
 
@@ -176,7 +203,7 @@ function job_pool_init()
     touch ${job_pool_result_log}
 
     # fork off the workers
-    _job_pool_start_workers ${job_pool_job_queue} ${job_pool_result_log}
+    _job_pool_start_workers ${job_pool_job_queue} ${job_pool_result_log} ${job_pool_lock_file}
 }
 
 # \brief connects to an existing job pool
@@ -188,6 +215,7 @@ function job_pool_connect()
     # set the global attibutes
     job_pool_job_queue=/tmp/job_pool_job_queue_${pool_name}
     job_pool_result_log=/tmp/job_pool_result_log_${pool_name}
+    job_pool_lock_file=/tmp/job_pool_mode_file_${pool_name}
     job_pool_pool_size=0
 }
 
@@ -215,7 +243,7 @@ function job_pool_run()
 function job_pool_wait()
 {
     _job_pool_stop_workers
-    _job_pool_start_workers ${job_pool_job_queue} ${job_pool_result_log}
+    _job_pool_start_workers ${job_pool_job_queue} ${job_pool_result_log} ${job_pool_lock_file}
 }
 #########################################
 # End of Job Pool
