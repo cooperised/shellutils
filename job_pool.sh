@@ -36,7 +36,7 @@ job_pool_sequential_tag="seq"
 job_pool_job_queue=/tmp/job_pool_job_queue_$$
 
 # lock file and mode file for job locking
-job_pool_lock_file=/tmp/job_pool_mode_file_$$
+job_pool_mode_file=/tmp/job_pool_mode_file_$$
 
 # where to run results to
 job_pool_result_log=/tmp/job_pool_result_log_$$
@@ -66,7 +66,11 @@ function _job_pool_echo()
 # \brief cleans up
 function _job_pool_cleanup()
 {
-    rm -f ${job_pool_job_queue} ${job_pool_result_log}
+    local pool_name=$1
+    local job_queue=/tmp/job_pool_job_queue_${pool_name}
+    local result_log=/tmp/job_pool_result_log_${pool_name}
+    local mode_file=/tmp/job_pool_mode_file_${pool_name}
+    rm -f ${job_queue} ${result_log} ${mode_file}
 }
 
 # \brief signal handler
@@ -80,8 +84,11 @@ function _job_pool_exit_handler()
 # \param[in] result_log  the file where the exit codes are written to
 function _job_pool_print_result_log()
 {
-    job_pool_nerrors=$(grep ^ERROR "${job_pool_result_log}" | wc -l)
-    cat "${job_pool_result_log}" | sed -e 's/^ERROR//'
+    local pool_name=$1
+    local result_log=/tmp/job_pool_result_log_${pool_name}
+
+    job_pool_nerrors=$(grep ^ERROR "${result_log}" | wc -l)
+    cat "${result_log}" | sed -e 's/^ERROR//'
 }
 
 # \brief the worker function that is called when we fork off worker processes
@@ -91,10 +98,11 @@ function _job_pool_print_result_log()
 # \param[in] mode_file  the lockfile and mode file for barriers
 function _job_pool_worker()
 {
-    local id=$1
-    local job_queue=$2
-    local result_log=$3
-    local mode_file=$4
+    local pool_name=$1
+    local id=$2
+    local job_queue=/tmp/job_pool_job_queue_${pool_name}
+    local result_log=/tmp/job_pool_result_log_${pool_name}
+    local mode_file=/tmp/job_pool_mode_file_${pool_name}
     local mode=
     local cmd=
     local args=
@@ -126,7 +134,7 @@ function _job_pool_worker()
         else
             _job_pool_echo "### _job_pool_worker-${id}: ${cmd}"
             # run the job
-            { ${cmd} "$@" ; }
+            ( eval ${cmd} "$@" ; )
             # now check the exit code and prepend "ERROR" to the result log entry
             # which we will use to count errors and then strip out later.
             local result=$?
@@ -155,9 +163,12 @@ function _job_pool_worker()
 # \brief sends message to worker processes to stop
 function _job_pool_stop_workers()
 {
+    local pool_name=$1
+    local job_queue=/tmp/job_pool_job_queue_${pool_name}
+    
     # send message to workers to exit, and wait for them to stop before
     # doing cleanup.
-    echo ${job_pool_end_of_jobs} >> ${job_pool_job_queue}
+    echo ${job_pool_end_of_jobs} >> ${job_queue}
     wait
     # TODO this isn't good enough - what if there are other forked jobs?
 }
@@ -168,11 +179,11 @@ function _job_pool_stop_workers()
 # \param[in] mode_file  the lockfile and mode file for barriers
 function _job_pool_start_workers()
 {
-    local job_queue=$1
-    local result_log=$2
-    local mode_file=$3
-    for ((i=0; i<${job_pool_pool_size}; i++)); do
-        _job_pool_worker ${i} ${job_queue} ${result_log} ${mode_file} &
+    local pool_name=$1
+    local pool_size=$2
+
+    for ((i=0; i<${pool_size}; i++)); do
+        _job_pool_worker ${pool_name} ${i} &
     done
 }
 
@@ -190,51 +201,46 @@ function job_pool_init()
     local pool_size=$2
     local echo_command=$3
 
+    local job_queue=/tmp/job_pool_job_queue_${pool_name}
+    local result_log=/tmp/job_pool_result_log_${pool_name}
+    local mode_file=/tmp/job_pool_mode_file_${pool_name}
+
     # set the global attibutes
-    job_pool_job_queue=/tmp/job_pool_job_queue_${pool_name}
-    job_pool_result_log=/tmp/job_pool_result_log_${pool_name}
-    job_pool_lock_file=/tmp/job_pool_mode_file_${pool_name}
-    job_pool_pool_size=${pool_size:=1}
     job_pool_echo_command=${echo_command:=0}
 
-    # create the fifo job queue and create the exit code log
-    rm -rf ${job_pool_job_queue} ${job_pool_result_log}
-    mkfifo ${job_pool_job_queue}
-    touch ${job_pool_result_log}
+    # create the fifo job queue and create the exit code log and mode file
+    rm -rf ${job_queue} ${result_log} ${mode_file}
+    mkfifo -m 600 ${job_queue}
+    touch ${result_log}
+    touch ${mode_file}
 
     # fork off the workers
-    _job_pool_start_workers ${job_pool_job_queue} ${job_pool_result_log} ${job_pool_lock_file}
-}
-
-# \brief connects to an existing job pool
-# \param[in] pool_name  name of the job pool
-function job_pool_connect()
-{
-    local pool_name=$1
-
-    # set the global attibutes
-    job_pool_job_queue=/tmp/job_pool_job_queue_${pool_name}
-    job_pool_result_log=/tmp/job_pool_result_log_${pool_name}
-    job_pool_lock_file=/tmp/job_pool_mode_file_${pool_name}
-    job_pool_pool_size=0
+    _job_pool_start_workers ${pool_name} ${pool_size}
 }
 
 # \brief waits for all queued up jobs to complete and shuts down the job pool
 function job_pool_shutdown()
 {
-    _job_pool_stop_workers
-    _job_pool_print_result_log
-    _job_pool_cleanup
+    local pool_name=$1
+
+    _job_pool_stop_workers ${pool_name}
+    _job_pool_print_result_log ${pool_name}
+#    _job_pool_cleanup ${pool_name}
 }
 
 # \brief run a job in the job pool
 function job_pool_run()
 {
-    if [[ "${job_pool_pool_size}" == "-1" ]]; then
-        job_pool_init
-    fi
-    printf "%s\v" "$@" >> ${job_pool_job_queue}
-    echo >> ${job_pool_job_queue}
+#    if [[ "${job_pool_pool_size}" == "-1" ]]; then
+#        job_pool_init
+#    fi
+    local pool_name=$1
+    local job_queue=/tmp/job_pool_job_queue_${pool_name}
+    
+    shift
+    
+    printf "%s\v" "$@" >> ${job_queue}
+    echo >> ${job_queue}
 }
 
 # \brief waits for all queued up jobs to complete before starting new jobs
@@ -242,9 +248,31 @@ function job_pool_run()
 # when done with the jobs and then restarting them.
 function job_pool_wait()
 {
-    _job_pool_stop_workers
-    _job_pool_start_workers ${job_pool_job_queue} ${job_pool_result_log} ${job_pool_lock_file}
+    local pool_name=$1
+    local sem=$(mktemp -u)
+    mkfifo -m 600 ${sem}
+    job_pool_run ${pool_name} ${job_pool_sequential_tag} "echo > ${sem}"
+    cat ${sem} > /dev/null
+    rm ${sem}
 }
 #########################################
 # End of Job Pool
 #########################################
+
+cmd=$1
+shift
+case $cmd in
+create)
+  job_pool_init "$@"
+  ;;
+run)
+  job_pool_run "$@"
+  ;;
+shutdown)
+  job_pool_shutdown "$@"
+  ;;
+"wait")
+  job_pool_wait "$@"
+  ;;
+esac
+
