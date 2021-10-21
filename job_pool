@@ -38,6 +38,7 @@ job_pool_sequential_tag="seq"
 # private functions
 ################################################################################
 
+
 # \brief prepends a string to each line of stdin
 # \param[in]  string to prepend
 _prepend()
@@ -74,8 +75,8 @@ _job_pool_worker()
     local cmd=
     local args=
     
-    local stdout_file=$(mktemp)
-    local stderr_file=$(mktemp)
+    local stdout_file=$(mktemp /dev/shm/tmp.XXXXXXXXXX)
+    local stderr_file=$(mktemp /dev/shm/tmp.XXXXXXXXXX)
 
     exec 7<> "${job_queue}"
     exec 9<> "${mode_file}"
@@ -113,7 +114,7 @@ _job_pool_worker()
             echo "[${id}]: ${cmd} $@" >> "${result_log}"
             flock --unlock 8
             # run the job
-            ( eval ${cmd} "$@" ; ) > "${stdout_file}" 2> "${stderr_file}"
+            ( "${cmd}" "$@" ; ) > "${stdout_file}" 2> "${stderr_file}"
             # now check the exit code and prepend "ERROR" to the result log entry
             # which we will use to count errors and then strip out later.
             local result="$?"
