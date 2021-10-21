@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 # Job pooling for bash shell scripts
 # This script provides a job pooling functionality where you can keep up to n
 # processes/functions running in parallel so that you don't saturate a system
@@ -32,60 +34,35 @@ job_pool_end_of_jobs="JOBPOOL_END_OF_JOBS"
 # sequential tasks are given this mode
 job_pool_sequential_tag="seq"
 
-# job queue used to send jobs to the workers
-job_pool_job_queue=/tmp/job_pool_job_queue_$$
-
-# lock file and mode file for job locking
-job_pool_mode_file=/tmp/job_pool_mode_file_$$
-
-# where to run results to
-job_pool_result_log=/tmp/job_pool_result_log_$$
-
-# toggle command echoing
-job_pool_echo_command=0
-
-# number of parallel jobs allowed.  also used to determine if job_pool_init
-# has been called when jobs are queued.
-job_pool_pool_size=-1
-
-# \brief variable to check for number of non-zero exits
-job_pool_nerrors=0
-
 ################################################################################
 # private functions
 ################################################################################
 
-# \brief debug output
-function _job_pool_echo()
+# \brief prepends a string to each line of stdin
+# \param[in]  string to prepend
+_prepend()
 {
-    if [[ "${job_pool_echo_command}" == "1" ]]; then
-        echo $@
-    fi
+    while read line; do
+        echo "${1}${line}";
+    done;
 }
 
 # \brief cleans up
-function _job_pool_cleanup()
+_job_pool_cleanup()
 {
-    local pool_name=$1
-    local job_queue=/tmp/job_pool_job_queue_${pool_name}
-    local result_log=/tmp/job_pool_result_log_${pool_name}
-    local mode_file=/tmp/job_pool_mode_file_${pool_name}
-    rm -f ${job_queue} ${result_log} ${mode_file}
-}
-
-# \brief signal handler
-function _job_pool_exit_handler()
-{
-    _job_pool_stop_workers
-    _job_pool_cleanup
+    local pool_name="$1"
+    local job_queue="/tmp/job_pool_job_queue_${pool_name}"
+    local result_log="/tmp/job_pool_result_log_${pool_name}"
+    local mode_file="/tmp/job_pool_mode_file_${pool_name}"
+    rm -f "${job_queue}" "${result_log}" "${mode_file}"
 }
 
 # \brief print the exit codes for each command
 # \param[in] result_log  the file where the exit codes are written to
-function _job_pool_print_result_log()
+_job_pool_print_result_log()
 {
-    local pool_name=$1
-    local result_log=/tmp/job_pool_result_log_${pool_name}
+    local pool_name="$1"
+    local result_log="/tmp/job_pool_result_log_${pool_name}"
 
     job_pool_nerrors=$(grep ^ERROR "${result_log}" | wc -l)
     cat "${result_log}" | sed -e 's/^ERROR//'
@@ -96,26 +73,29 @@ function _job_pool_print_result_log()
 # \param[in] job_queue  the fifo to read jobs from
 # \param[in] result_log  the temporary log file to write exit codes to
 # \param[in] mode_file  the lockfile and mode file for barriers
-function _job_pool_worker()
+_job_pool_worker()
 {
-    local pool_name=$1
-    local id=$2
-    local job_queue=/tmp/job_pool_job_queue_${pool_name}
-    local result_log=/tmp/job_pool_result_log_${pool_name}
-    local mode_file=/tmp/job_pool_mode_file_${pool_name}
+    local pool_name="$1"
+    local id="$2"
+    local job_queue="/tmp/job_pool_job_queue_${pool_name}"
+    local result_log="/tmp/job_pool_result_log_${pool_name}"
+    local mode_file="/tmp/job_pool_mode_file_${pool_name}"
     local mode=
     local cmd=
     local args=
+    
+    local stdout_file=$(mktemp)
+    local stderr_file=$(mktemp)
 
-    exec 7<> ${job_queue}
-    exec 9<> ${mode_file}
+    exec 7<> "${job_queue}"
+    exec 9<> "${mode_file}"
     while [[ "${mode}" != "${job_pool_end_of_jobs}" && -e "${job_queue}" ]]; do
         # workers block on the exclusive lock to read the job queue
         flock --exclusive 7
         flock --shared 9
         IFS=$'\v'
         read mode cmd args <${job_queue}
-        if ! grep -Fxq $mode ${mode_file}; then
+        if ! grep -Fxq "$mode" ${mode_file}; then
           flock --exclusive 9
           echo "$mode" > ${mode_file};
           flock --shared 9
@@ -132,24 +112,27 @@ function _job_pool_worker()
             # will know we are exiting.
             echo "${mode}" >&7
         else
-            _job_pool_echo "### _job_pool_worker-${id}: ${cmd}"
+            exec 8<> "${result_log}"
+            flock --exclusive 8
+            echo "[${id}]: ${cmd} $@" >> "${result_log}"
+            flock --unlock 8
             # run the job
-            ( eval ${cmd} "$@" ; )
+            ( eval ${cmd} "$@" ; ) > "${stdout_file}" 2> "${stderr_file}"
             # now check the exit code and prepend "ERROR" to the result log entry
             # which we will use to count errors and then strip out later.
-            local result=$?
-            local status=
-            if [[ "${result}" != "0" ]]; then
-                status=ERROR
-            fi
+            local result="$?"
             # now write the error to the log, making sure multiple processes
             # don't trample over each other.
-            exec 8<> ${result_log}
             flock --exclusive 8
-            _job_pool_echo "${status}job_pool: exited ${result}: ${cmd} $@" >> ${result_log}
+            _prepend " [${id}]: " < "${stdout_file}" >> "${result_log}"
+            _prepend " ERROR [${id}]: " < "${stdout_file}" >> "${result_log}"
+            if [[ "${result}" -eq 0 ]]; then
+              echo " [${id}]: exit 0" >> "${result_log}"
+            else
+              echo " ERROR [${id}]: exit ${result}" >> "${result_log}"
+            fi
             flock --unlock 8
             exec 8>&-
-            _job_pool_echo "### _job_pool_worker-${id}: exited ${result}: ${cmd} $@"
         fi
         flock --unlock 9
         if [[ "${job_pool_sequential_tag}" == "${mode}" ]]; then
@@ -161,29 +144,28 @@ function _job_pool_worker()
 }
 
 # \brief sends message to worker processes to stop
-function _job_pool_stop_workers()
+_job_pool_stop_workers()
 {
-    local pool_name=$1
-    local job_queue=/tmp/job_pool_job_queue_${pool_name}
+    local pool_name="$1"
+    local job_queue="/tmp/job_pool_job_queue_${pool_name}"
     
     # send message to workers to exit, and wait for them to stop before
     # doing cleanup.
-    echo ${job_pool_end_of_jobs} >> ${job_queue}
+    echo "${job_pool_end_of_jobs}" >> "${job_queue}"
     wait
     # TODO this isn't good enough - what if there are other forked jobs?
 }
 
 # \brief fork off the workers
-# \param[in] job_queue  the fifo used to send jobs to the workers
-# \param[in] result_log  the temporary log file to write exit codes to
-# \param[in] mode_file  the lockfile and mode file for barriers
-function _job_pool_start_workers()
+# \param[in] pool_name  name of the job pool
+# \param[in] pool_size  number of parallel jobs allowed
+_job_pool_start_workers()
 {
-    local pool_name=$1
-    local pool_size=$2
+    local pool_name="$1"
+    local pool_size="$2"
 
-    for ((i=0; i<${pool_size}; i++)); do
-        _job_pool_worker ${pool_name} ${i} &
+    for ((i=0; i<"${pool_size}"; i++)); do
+        _job_pool_worker "${pool_name}" "${i}" &
     done
 }
 
@@ -194,74 +176,69 @@ function _job_pool_start_workers()
 # \brief initializes the job pool
 # \param[in] pool_name  name of the job pool
 # \param[in] pool_size  number of parallel jobs allowed
-# \param[in] echo_command  1 to turn on echo, 0 to turn off
-function job_pool_init()
+job_pool_init()
 {
-    local pool_name=$1
-    local pool_size=$2
-    local echo_command=$3
+    local pool_name="${1:-JOB_POOL}"
+    local pool_size="${2:-8}"
 
-    local job_queue=/tmp/job_pool_job_queue_${pool_name}
-    local result_log=/tmp/job_pool_result_log_${pool_name}
-    local mode_file=/tmp/job_pool_mode_file_${pool_name}
-
-    # set the global attibutes
-    job_pool_echo_command=${echo_command:=0}
+    local job_queue="/tmp/job_pool_job_queue_${pool_name}"
+    local result_log="/tmp/job_pool_result_log_${pool_name}"
+    local mode_file="/tmp/job_pool_mode_file_${pool_name}"
 
     # create the fifo job queue and create the exit code log and mode file
-    rm -rf ${job_queue} ${result_log} ${mode_file}
-    mkfifo -m 600 ${job_queue}
-    touch ${result_log}
-    touch ${mode_file}
+    rm -rf "${job_queue}" "${result_log}" "${mode_file}"
+    mkfifo -m 600 "${job_queue}"
+    touch "${result_log}"
+    touch "${mode_file}"
 
     # fork off the workers
-    _job_pool_start_workers ${pool_name} ${pool_size}
+    _job_pool_start_workers "${pool_name}" "${pool_size}" "${echo_command}"
 }
 
 # \brief waits for all queued up jobs to complete and shuts down the job pool
-function job_pool_shutdown()
+job_pool_shutdown()
 {
-    local pool_name=$1
+    local pool_name="$1"
 
-    _job_pool_stop_workers ${pool_name}
-    _job_pool_print_result_log ${pool_name}
-#    _job_pool_cleanup ${pool_name}
+    _job_pool_stop_workers "${pool_name}"
+    _job_pool_cleanup "${pool_name}"
 }
 
 # \brief run a job in the job pool
-function job_pool_run()
+job_pool_run()
 {
-#    if [[ "${job_pool_pool_size}" == "-1" ]]; then
-#        job_pool_init
-#    fi
-    local pool_name=$1
-    local job_queue=/tmp/job_pool_job_queue_${pool_name}
+    local pool_name="$1"
+    local job_queue="/tmp/job_pool_job_queue_${pool_name}"
     
+    if [[ ! -e "${job_queue}" == "-1" ]]; then
+        job_pool_init "${pool_name}"
+    fi
+
     shift
     
-    printf "%s\v" "$@" >> ${job_queue}
-    echo >> ${job_queue}
+    printf "%s\v" "$@" >> "${job_queue}"
+    echo >> "${job_queue}"
 }
 
 # \brief waits for all queued up jobs to complete before starting new jobs
 # This function actually fakes a wait by telling the workers to exit
 # when done with the jobs and then restarting them.
-function job_pool_wait()
+job_pool_wait()
 {
-    local pool_name=$1
+    local pool_name="$1"
     local sem=$(mktemp -u)
-    mkfifo -m 600 ${sem}
-    job_pool_run ${pool_name} ${job_pool_sequential_tag} "echo > ${sem}"
-    cat ${sem} > /dev/null
-    rm ${sem}
+    mkfifo -m 600 "${sem}"
+    job_pool_run "${pool_name}" "${job_pool_sequential_tag}" "echo > ${sem}"
+    cat "${sem}" > /dev/null
+    rm "${sem}"
 }
 #########################################
 # End of Job Pool
 #########################################
 
-cmd=$1
+cmd="$1"
 shift
-case $cmd in
+case "$cmd" in
 create)
   job_pool_init "$@"
   ;;
