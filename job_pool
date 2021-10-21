@@ -121,7 +121,7 @@ _job_pool_worker()
             # don't trample over each other.
             flock --exclusive 8
             _prepend " [${id}]: " < "${stdout_file}" >> "${result_log}"
-            _prepend " ERROR [${id}]: " < "${stdout_file}" >> "${result_log}"
+            _prepend " ERROR [${id}]: " < "${sterr_file}" >> "${result_log}"
             if [[ "${result}" -eq 0 ]]; then
               echo " [${id}]: exit 0" >> "${result_log}"
             else
