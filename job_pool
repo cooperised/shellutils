@@ -47,16 +47,6 @@ _prepend()
     done;
 }
 
-# \brief cleans up
-_job_pool_cleanup()
-{
-    local pool_name="$1"
-    local job_queue="/tmp/job_pool_job_queue_${pool_name}"
-    local result_log="/tmp/job_pool_result_log_${pool_name}"
-    local mode_file="/tmp/job_pool_mode_file_${pool_name}"
-    rm -f "${job_queue}" "${result_log}" "${mode_file}"
-}
-
 # \brief print the exit codes for each command
 # \param[in] result_log  the file where the exit codes are written to
 _job_pool_print_result_log()
@@ -94,24 +84,30 @@ _job_pool_worker()
         flock --exclusive 7
         flock --shared 9
         IFS=$'\v'
-        read mode cmd args <${job_queue}
-        if ! grep -Fxq "$mode" ${mode_file}; then
-          flock --exclusive 9
-          echo "$mode" > ${mode_file};
-          flock --shared 9
-        fi
-        set -- ${args}
-        unset IFS
-        if [[ "${job_pool_sequential_tag}" != "${mode}" ]]; then
-          flock --unlock 7
-        fi
+        read mode cmd args <&7
         # the worker should exit if it sees the end-of-job marker or run the
         # job otherwise and save its exit code to the result log.
         if [[ "${mode}" == "${job_pool_end_of_jobs}" ]]; then
-            # write it one more time for the next sibling so that everyone
-            # will know we are exiting.
-            echo "${mode}" >&7
+            unset IFS
+            # nasty hack, really - assumes max 32 workers.  must find a fix
+            for i in {1..32}; do
+              echo "${job_pool_end_of_jobs}" >&7
+            done
+            # delete the queue and let the other workers clean themselves up
+            rm -f "${job_queue}"
+            rm -f "${mode_file}"
+            flock --unlock 7
         else
+            if ! grep -Fxq "$mode" ${mode_file}; then
+              flock --exclusive 9
+              echo "$mode" > ${mode_file};
+              flock --shared 9
+            fi
+            set -- ${args}
+            unset IFS
+            if [[ "${job_pool_sequential_tag}" != "${mode}" ]]; then
+              flock --unlock 7
+            fi
             exec 8<> "${result_log}"
             flock --exclusive 8
             echo "[${id}]: ${cmd} $@" >> "${result_log}"
@@ -141,20 +137,9 @@ _job_pool_worker()
     done
     exec 7>&-
     exec 9>&-
+    rm -f "${stdout_file}" "${stderr_file}"
 }
 
-# \brief sends message to worker processes to stop
-_job_pool_stop_workers()
-{
-    local pool_name="$1"
-    local job_queue="/tmp/job_pool_job_queue_${pool_name}"
-    
-    # send message to workers to exit, and wait for them to stop before
-    # doing cleanup.
-    echo "${job_pool_end_of_jobs}" >> "${job_queue}"
-    wait
-    # TODO this isn't good enough - what if there are other forked jobs?
-}
 
 # \brief fork off the workers
 # \param[in] pool_name  name of the job pool
@@ -199,9 +184,13 @@ job_pool_init()
 job_pool_shutdown()
 {
     local pool_name="$1"
+    local job_queue="/tmp/job_pool_job_queue_${pool_name}"
+#    local result_log="/tmp/job_pool_result_log_${pool_name}"
+#    local mode_file="/tmp/job_pool_mode_file_${pool_name}"
 
-    _job_pool_stop_workers "${pool_name}"
-    _job_pool_cleanup "${pool_name}"
+    echo "${job_pool_end_of_jobs}" >> "${job_queue}"
+    
+#    rm -f "${job_queue}" "${result_log}" "${mode_file}"
 }
 
 # \brief run a job in the job pool
@@ -210,7 +199,7 @@ job_pool_run()
     local pool_name="$1"
     local job_queue="/tmp/job_pool_job_queue_${pool_name}"
     
-    if [[ ! -e "${job_queue}" == "-1" ]]; then
+    if [[ ! -e "${job_queue}" ]]; then
         job_pool_init "${pool_name}"
     fi
 
