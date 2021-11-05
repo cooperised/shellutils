@@ -39,6 +39,14 @@ job_pool_sequential_tag="seq"
 ################################################################################
 
 
+_token_quote() {
+    local quoted=()
+    for token; do
+        quoted+=( "$(printf '%q' "$token")" )
+    done
+    printf '%s\n' "${quoted[*]}"
+}
+
 # \brief prepends a string to each line of stdin
 # \param[in]  string to prepend
 _prepend()
@@ -69,7 +77,8 @@ _job_pool_worker()
     local pool_name="$1"
     local id="$2"
     local job_queue="/tmp/job_pool_job_queue_${pool_name}"
-    local result_log="/tmp/job_pool_result_log_${pool_name}"
+#    local result_log="/tmp/job_pool_result_log_${pool_name}"
+    local result_log="/dev/stdout"
     local mode_file="/tmp/job_pool_mode_file_${pool_name}"
     local mode=
     local cmd=
@@ -168,11 +177,12 @@ job_pool_init()
     local pool_size="${2:-8}"
 
     local job_queue="/tmp/job_pool_job_queue_${pool_name}"
-    local result_log="/tmp/job_pool_result_log_${pool_name}"
+#    local result_log="/tmp/job_pool_result_log_${pool_name}"
+    local result_log="/dev/stdout"
     local mode_file="/tmp/job_pool_mode_file_${pool_name}"
 
     # create the fifo job queue and create the exit code log and mode file
-    rm -rf "${job_queue}" "${result_log}" "${mode_file}"
+    rm -rf "${job_queue}" "${result_log}" "${mode_file}" 2>/dev/null
     mkfifo -m 600 "${job_queue}"
     touch "${result_log}"
     touch "${mode_file}"
@@ -199,6 +209,7 @@ job_pool_run()
 {
     local pool_name="$1"
     local job_queue="/tmp/job_pool_job_queue_${pool_name}"
+    local job_queue_lock="/var/lock/job_pool_${pool_name}"
     
     if [[ ! -e "${job_queue}" ]]; then
         job_pool_init "${pool_name}"
@@ -206,8 +217,12 @@ job_pool_run()
 
     shift
     
+    exec 200<> "${job_queue_lock}"
+    flock --exclusive 200
     printf "%s\v" "$@" >> "${job_queue}"
     echo >> "${job_queue}"
+    flock --unlock 200
+    exec 200>&-
 }
 
 # \brief waits for all queued up jobs to complete before starting new jobs
